@@ -11,6 +11,7 @@ module Ngrok
 
     class << self
       attr_reader :pid, :ngrok_url, :ngrok_url_https, :status
+      attr_reader :type # http, tls, or tcp
 
       def init(params = {})
         # map old key 'port' to 'addr' to maintain backwards compatibility with versions 2.0.21 and earlier
@@ -18,6 +19,7 @@ module Ngrok
 
         @params = {addr: 3001, timeout: 10, config: '/dev/null'}.merge(params)
         @status = :stopped unless @status
+        @type = params[:type] || 'http'
       end
 
       def start(params = {})
@@ -26,7 +28,8 @@ module Ngrok
 
         if stopped?
           @params[:log] = (@params[:log]) ? File.open(@params[:log], 'w+') : Tempfile.new('ngrok')
-          @pid = spawn("exec ngrok http " + ngrok_exec_params)
+          command_string = "exec ngrok #{@type} " + ngrok_exec_params
+          @pid = spawn(command_string)
           at_exit { Ngrok::Tunnel.stop }
           fetch_urls
         end
@@ -93,18 +96,17 @@ module Ngrok
       def fetch_urls
         @params[:timeout].times do
           log_content = @params[:log].read
-          result = log_content.scan(/URL:(.+)\sProto:(http|https)\s/)
+          result = log_content.scan(/URL:(.+)\sProto:(http|https|tcp)\s/)
           if !result.empty?
             result = Hash[*result.flatten].invert
-            @ngrok_url = result['http']
-            @ngrok_url_https = result['https']
+            assign_urls(result)
             return @ngrok_url if @ngrok_url
           end
 
           error = log_content.scan(/msg="command failed" err="([^"]+)"/).flatten
           unless error.empty?
             self.stop
-            raise Ngrok::Error, error.first
+            raise Tunnel::Error, error.first
           end
 
           sleep 1
@@ -119,7 +121,32 @@ module Ngrok
       rescue Errno::ENOENT
         raise Ngrok::NotFound, "Ngrok binary not found"
       end
-    end
+
+      def log_content_regex
+        case @type
+        when 'http'
+          /URL:(.+)\sProto:(http|https)\s/
+        when 'tls'
+          /URL:(.+)\sProto:(http)\s/
+        when 'tcp'
+          /URL:(.+)\sProto:(tcp)\s/
+        end
+      end
+
+      def assign_urls(result)
+        case @type
+        when 'http'
+          @ngrok_url = result['http']
+          @ngrok_url_https = result['https']
+        when 'tls'
+          @ngrok_url = result[@type]
+          @ngrok_url_https = result[@type]
+        when 'tcp'
+          @ngrok_url = result[@type]
+          @ngrok_url_https = result[@type]
+        end
+      end
+    end # class << self
 
     init
 
